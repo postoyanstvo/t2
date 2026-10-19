@@ -60,6 +60,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
       - run: npm ci && npm run lint
 
   typecheck:
@@ -67,6 +71,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
       - run: npm ci && npx tsc --noEmit
 
   security-scan:
@@ -74,7 +82,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npm audit --audit-level=high
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci && npm audit --audit-level=high
 
   # ── 3. MATRIX ─────────────────────────────────────────────────────────────
   test-unit:
@@ -116,7 +128,7 @@ jobs:
     needs: setup
     runs-on: ubuntu-latest
     container:
-      image: node:20-slim
+      image: node:20          # ← было node:20-slim (нет git)
       env:
         BUILD_MODE: production
     steps:
@@ -133,26 +145,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
       - run: npm ci
       - run: npm run docs
 
   publish:
-    needs: [build, build-docs]
+    needs: [setup, build, build-docs]   # ← добавлен setup
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment:
       name: production
       url: https://example.com
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
       - uses: actions/download-artifact@v4
         with:
           name: build-output-${{ needs.setup.outputs.build_id }}
           path: dist/
+      - run: npm ci
       - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}   # ← нужен secret
 
   # ── 5. SERVICE CONTAINERS ─────────────────────────────────────────────────
   test-integration:
-    needs: test-unit
+    needs: [setup, test-unit]           # ← добавлен setup
     if: needs.setup.outputs.skip_tests != 'true'
     runs-on: ubuntu-latest
     services:
@@ -177,6 +201,10 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
       - run: npm ci
       - run: npm run test:integration
         env:
@@ -185,7 +213,7 @@ jobs:
 
   # ── 6. CONDITIONAL DEPLOYS ────────────────────────────────────────────────
   deploy-staging:
-    needs: [test-integration, publish]
+    needs: [setup, test-integration, publish]   # ← добавлен setup
     if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
     runs-on: ubuntu-latest
     environment: staging
@@ -193,7 +221,7 @@ jobs:
       - run: echo "Deploying to staging, build ${{ needs.setup.outputs.build_id }}"
 
   deploy-production:
-    needs: [test-integration, publish]
+    needs: [setup, test-integration, publish]   # ← добавлен setup
     if: github.event_name == 'workflow_dispatch' && inputs.environment == 'production'
     runs-on: ubuntu-latest
     environment: production
@@ -208,10 +236,9 @@ jobs:
     steps:
       - run: |
           echo "PR checks passed for ${{ github.head_ref }}"
-          echo "Build ID: ${{ needs.setup.outputs.build_id }}"
 
   notify-release:
-    needs: [publish]
+    needs: [setup, publish]             # ← добавлен setup (для build_id в будущем)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -220,7 +247,7 @@ jobs:
   # ── 8. always() ───────────────────────────────────────────────────────────
   cleanup:
     if: always()
-    needs: [build, publish, deploy-staging, deploy-production]
+    needs: [setup, build, publish, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     steps:
       - run: |
@@ -256,19 +283,16 @@ jobs:
           echo "Coverage ${{ needs.analyze-coverage.outputs.coverage_pct }}% below threshold"
           exit 1
 
-  # ── 10. CONTAINER + VOLUMES ───────────────────────────────────────────────
+  # ── 10. CONTAINER ─────────────────────────────────────────────────────────
   perf-test:
     needs: [build]
     runs-on: ubuntu-latest
     container:
-      image: grafana/k6:latest
-      volumes:
-        - /tmp/perf-results:/results
+      image: grafana/k6:latest          # git нет → checkout убран
     steps:
-      - uses: actions/checkout@v4
       - run: echo "k6 benchmark placeholder"
 
-  # ── 11. SMOKE TEST ─────────────────────────────────────────────────────────
+  # ── 11. SMOKE TEST ────────────────────────────────────────────────────────
   smoke-test:
     needs: [deploy-staging, deploy-production]
     if: always() && (needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success')
@@ -276,7 +300,7 @@ jobs:
     steps:
       - run: echo "Smoke test passed"
 
-  # ── 12. FINAL GATE ─────────────────────────────────────────────────────────
+  # ── 12. FINAL GATE ────────────────────────────────────────────────────────
   report:
     needs:
       - setup
